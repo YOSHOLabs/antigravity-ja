@@ -1,0 +1,38 @@
+{
+  "name": "antigravity-ja",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "license": "MIT",
+  "description": "Antigravity App (2.0) 自然な日本語UIローカライズツールキット",
+  "keywords": [
+    "antigravity",
+    "japanese",
+    "i18n",
+    "l10n",
+    "localization",
+    "electron"
+  ],
+  "scripts": {
+    "app": "node src/cli.js app",
+    "launch": "node src/cli.js launch --gui",
+    "shortcut": "node src/cli.js create-shortcut",
+    "test": "node --test test/*.test.js",
+    "status": "node src/cli.js status",
+    "apply": "node src/cli.js apply",
+    "restore": "node src/cli.js restore",
+    "sync": "node src/cli.js sync",
+    "validate": "node src/cli.js validate"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "homepage": "https://github.com/YOSHOLabs/antigravity-ja#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOSHOLabs/antigravity-ja.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YOSHOLabs/antigravity-ja/issues"
+  }
+}
