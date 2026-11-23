@@ -205,6 +205,7 @@ function compileBundle(rawBundle) {
     collectUntranslated: Boolean(rawBundle?.collectUntranslated),
     autoCollectTooltips: rawBundle?.autoCollectTooltips !== false,
     japaneseTypography: rawBundle?.japaneseTypography !== false,
+    autoTranslate: rawBundle?.autoTranslate !== false,
     exactMap,
     patternList,
     ignoredSet,
@@ -279,8 +280,11 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const WIN_PATH_RE = /^[A-Za-z]:[\\/]/;
 const POSIX_PATH_RE = /^(?:~\/|\/(?:[^/\s]+\/)+[^/\s]*$)/;
 const REL_FILE_RE = /^[^\s]+\/[^\s]+\.[a-z0-9]{1,8}$/i;
+const BARE_FILENAME_RE =
+  /^[^\s/\\]+\.(?:bat|cmd|vbs|js|mjs|cjs|ts|tsx|jsx|json|md|py|exe|dll|asar|lnk|png|jpg|jpeg|gif|webp|mp4|wav|log|txt|yml|yaml|css|html|svg)$/i;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEX_HASH_RE = /^(?:0x)?[0-9a-f]{12,}$/i;
+const CSS_UNIT_RE = /^\d+(?:\.\d+)?(?:px|rem|em|vh|vw|%|ms|s)$/i;
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/i;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?)?$/;
 const TIME_RE = /^\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?$/i;
@@ -308,8 +312,7 @@ function shouldCollectCandidate(core, meta, compiled) {
   }
   if (HAS_CJK_RE.test(core)) return false;
   if (!HAS_LETTERS_RE.test(core)) return false;
-  if (SHORTCUT_COMBO_RE.test(core)) return false;
-  if (meta?.inTooltip && TOOLTIP_KEYCAP_RE.test(core)) return false;
+  if (SHORTCUT_COMBO_RE.test(core) || TOOLTIP_KEYCAP_RE.test(core)) return false;
   const normCore = normalizeLookupKey(core);
   if (
     compiled.exactMap.has(core) ||
@@ -327,8 +330,10 @@ function shouldCollectCandidate(core, meta, compiled) {
     WIN_PATH_RE.test(core) ||
     POSIX_PATH_RE.test(core) ||
     REL_FILE_RE.test(core) ||
+    BARE_FILENAME_RE.test(core) ||
     UUID_RE.test(core) ||
     HEX_HASH_RE.test(core) ||
+    CSS_UNIT_RE.test(core) ||
     SEMVER_RE.test(core) ||
     ISO_DATE_RE.test(core) ||
     TIME_RE.test(core)

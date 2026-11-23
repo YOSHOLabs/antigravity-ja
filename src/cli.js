@@ -18,6 +18,7 @@ const {
 const { createDesktopShortcuts, isAppPatchedFast, launchAntigravity, openAppWindow } = require('./launcher');
 const { getUserDataFiles, resolveAntigravityPaths } = require('./paths');
 const { applyPatch, getStatus, isAntigravityRunning, restorePatch } = require('./patcher');
+const { runAutoTranslateForUserDir } = require('./runtime/autoTranslator');
 
 function printHelp() {
   console.log(`Antigravity 日本語UIローカライズ & ランチャー (antigravity-ja)
@@ -33,6 +34,7 @@ function printHelp() {
   apply                          app.asar に日本語UIパッチを適用（自動バックアップ付き）
   restore                        バックアップから元の英語UIへ完全に復元
   sync                           最新の基本辞書をユーザーフォルダ (~/.antigravity-ja) へ同期
+  auto-translate                 収集済みの未翻訳UIテキストを自動翻訳 (auto.json)
   validate                       辞書ファイルと用語集の整合性を検証
   export-untranslated [--out F]  収集済み未翻訳テキストのAI一括翻訳プロンプトを出力
   import <jsonFile>              翻訳済みJSONファイルをカスタム辞書へマージ
@@ -128,7 +130,7 @@ async function main() {
     console.log(`アプリ起動中     : ${st.antigravityRunning ? 'はい' : 'いいえ'}`);
     console.log(`ユーザー辞書     : ${st.userDataDir}`);
     console.log(
-      `辞書エントリ数   : 基本 ${st.dictionaryStats.exactCount}件 + パターン ${st.dictionaryStats.patternCount}件 / カスタム ${st.dictionaryStats.customExactCount}件`
+      `辞書エントリ数   : 基本 ${st.dictionaryStats.exactCount}件 + パターン ${st.dictionaryStats.patternCount}件 / 自動翻訳 ${st.dictionaryStats.autoExactCount || 0}件 / カスタム ${st.dictionaryStats.customExactCount}件`
     );
     console.log(`未翻訳収集数     : ${st.untranslatedCount}件`);
     return;
@@ -165,6 +167,22 @@ async function main() {
       console.log(`未翻訳リストから翻訳済み・不要な項目 ${pruned.removed}件 を整理しました（残り ${pruned.remaining}件）`);
     }
     console.log('（設定やカスタム辞書はそのまま保持されています）');
+    return;
+  }
+
+  if (command === 'auto-translate') {
+    ensureUserDataDir(flags.userDataDir, { refreshBaseDict: false });
+    const glossary = loadGlossary();
+    const res = await runAutoTranslateForUserDir(flags.userDataDir, {
+      maxItems: 60,
+      timeoutMs: 15000,
+      force: true,
+      glossary,
+    });
+    if (res.error) {
+      throw new Error(`自動翻訳に失敗しました (${res.provider}): ${res.error}`);
+    }
+    console.log(`自動翻訳完了 (${res.provider}): 対象 ${res.attempted}件 -> 翻訳 ${res.translated}件 (スキップ ${res.skipped}件)`);
     return;
   }
 
@@ -225,7 +243,7 @@ async function main() {
     if (!flags.gui && fs.existsSync(paths.asarPath) && !isAppPatchedFast(paths.asarPath)) {
       await waitUntilAntigravityClosed();
     }
-    const res = launchAntigravity({
+    const res = await launchAntigravity({
       installDir: flags.installDir,
       userDataDir: flags.userDataDir,
       gui: Boolean(flags.gui),

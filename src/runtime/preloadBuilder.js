@@ -57,6 +57,7 @@ ${coreSource}
     collectUntranslated: false,
     autoCollectTooltips: true,
     japaneseTypography: true,
+    autoTranslate: false,
     exact: {},
     patterns: [],
     ignored: [],
@@ -160,7 +161,7 @@ ${coreSource}
       return;
     }
     const inTooltip = isInsideTooltip(el);
-    if (!compiled.collectUntranslated && !(compiled.autoCollectTooltips && inTooltip)) {
+    if (!compiled.collectUntranslated && !compiled.autoTranslate && !(compiled.autoCollectTooltips && inTooltip)) {
       return;
     }
     if (reportedCache.size >= 1500) {
@@ -441,7 +442,7 @@ ${coreSource}
       lastAppliedRevision = rev;
     }
     compiled = core.compileBundle(rawBundle);
-    if (!compiled.collectUntranslated && !compiled.autoCollectTooltips) {
+    if (!compiled.collectUntranslated && !compiled.autoTranslate && !compiled.autoCollectTooltips) {
       pendingReport.clear();
     }
     syncJapaneseTypography(compiled.enabled && compiled.japaneseTypography);

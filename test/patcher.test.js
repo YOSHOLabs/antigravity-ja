@@ -8,7 +8,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const { EventEmitter } = require('node:events');
-const { readAsarFile, sha256File } = require('../src/asar');
+const { buildAsarHeaderBuffer, readAsarFile, readAsarHeader, sha256File } = require('../src/asar');
 const { createAppHandler, startAppServer } = require('../src/appServer');
 const {
   createDesktopShortcuts,
@@ -67,10 +67,30 @@ test('Full applyPatch / idempotency / vm.Script syntax check / restorePatch on t
     const mainJs = readAsarFile(tmpAsar, 'dist/main.js').toString('utf8');
     const preloadJs = readAsarFile(tmpAsar, 'dist/preload.js').toString('utf8');
     const jaMainJs = readAsarFile(tmpAsar, 'dist/jaI18nMain.js').toString('utf8');
+    const jaAutoJs = readAsarFile(tmpAsar, 'dist/jaAutoTranslator.js').toString('utf8');
 
     assert.doesNotThrow(() => new vm.Script(mainJs, { filename: 'dist/main.js' }));
     assert.doesNotThrow(() => new vm.Script(preloadJs, { filename: 'dist/preload.js' }));
     assert.doesNotThrow(() => new vm.Script(jaMainJs, { filename: 'dist/jaI18nMain.js' }));
+    assert.doesNotThrow(() => new vm.Script(jaAutoJs, { filename: 'dist/jaAutoTranslator.js' }));
+
+    // Missing dist/jaAutoTranslator.js must cause isAppPatchedFast to treat ASAR as outdated/unpatched
+    const headerWithoutAuto = JSON.parse(JSON.stringify(readAsarHeader(tmpAsar).header));
+    delete headerWithoutAuto.files.dist.files['jaAutoTranslator.js'];
+    const partialAsarPath = path.join(tmpRoot, 'partial.asar');
+    const partialPayloadOffset = readAsarHeader(tmpAsar).payloadOffset;
+    const rawAsarFd = fs.openSync(tmpAsar, 'r');
+    try {
+      const st = fs.statSync(tmpAsar);
+      const partialHdrBuf = buildAsarHeaderBuffer(headerWithoutAuto);
+      const restLen = st.size - partialPayloadOffset;
+      const restBuf = Buffer.alloc(restLen);
+      fs.readSync(rawAsarFd, restBuf, 0, restLen, partialPayloadOffset);
+      fs.writeFileSync(partialAsarPath, Buffer.concat([partialHdrBuf, restBuf]));
+    } finally {
+      fs.closeSync(rawAsarFd);
+    }
+    assert.equal(isAppPatchedFast(partialAsarPath), false);
 
     // Verify user custom.json survives a second idempotent apply
     const customPath = path.join(tmpUserDir, 'custom.json');
@@ -166,7 +186,20 @@ test('Unified App HTTP endpoints, origin guard, and inline client script work en
   assert.match(srv.url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
   await srv.close();
 
-  const handler = createAppHandler(tmpUserDir);
+  const mockFetch = async (url) => {
+    const parsed = new URL(url);
+    const q = parsed.searchParams.get('q') || '';
+    const ja = q === 'Auto Discover Item' ? '自動発見項目' : '一時項目';
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return [[[ja, q]]];
+      },
+    };
+  };
+
+  const handler = createAppHandler(tmpUserDir, { _fetch: mockFetch });
   try {
     const htmlRes = await invokeHandler(handler, 'GET', '/');
     assert.equal(htmlRes.status, 200);
@@ -243,11 +276,71 @@ test('Unified App HTTP endpoints, origin guard, and inline client script work en
       collectUntranslated: true,
       autoCollectTooltips: false,
       japaneseTypography: false,
+      autoTranslate: true,
+      autoTranslateProvider: 'gemini',
+      autoTranslateApiKey: 'secret-test-key-xyz',
+      autoTranslateModel: 'gemini-2.5-flash',
     });
     assert.equal(cfgRes.status, 200);
     assert.equal(cfgRes.json().config.collectUntranslated, true);
     assert.equal(cfgRes.json().config.autoCollectTooltips, false);
     assert.equal(cfgRes.json().config.japaneseTypography, false);
+    assert.equal(cfgRes.json().config.autoTranslate, true);
+    assert.equal(cfgRes.json().config.autoTranslateProvider, 'gemini');
+    assert.equal(cfgRes.json().config.hasApiKey, true);
+    assert.equal(cfgRes.json().config.autoTranslateApiKey, undefined);
+    assert.equal(cfgRes.text.includes('secret-test-key-xyz'), false);
+
+    // Switch back to free provider and test manual auto-translate action, delete source:'auto', and clear-auto
+    const badEndpointRes = await invokeHandler(handler, 'POST', '/api/config', {
+      autoTranslateProvider: 'openai',
+      autoTranslateEndpoint: 'http://remote.example/api',
+    });
+    assert.equal(badEndpointRes.status, 400);
+
+    const localEndpointRes = await invokeHandler(handler, 'POST', '/api/config', {
+      autoTranslateProvider: 'ollama',
+      autoTranslateEndpoint: 'http://127.0.0.1:11434',
+    });
+    assert.equal(localEndpointRes.status, 200);
+
+    await invokeHandler(handler, 'POST', '/api/config', {
+      autoTranslateProvider: 'free',
+      autoTranslateEndpoint: '',
+      clearApiKey: true,
+    });
+    const stateClearedKey = (await invokeHandler(handler, 'GET', '/api/state')).json();
+    assert.equal(stateClearedKey.config.hasApiKey, false);
+    assert.equal(stateClearedKey.text?.includes('secret-test-key-xyz') || false, false);
+
+    fs.writeFileSync(
+      path.join(tmpUserDir, 'untranslated.json'),
+      JSON.stringify({
+        items: {
+          'Auto Discover Item': { count: 2, tags: ['BUTTON'], roles: ['button'], attrs: [] },
+          'Temp Auto Item': { count: 1, tags: ['SPAN'], roles: [], attrs: [] },
+        },
+      }),
+      'utf8'
+    );
+
+    const autoRes = await invokeHandler(handler, 'POST', '/api/action/auto-translate', {});
+    assert.equal(autoRes.status, 200);
+    assert.equal(autoRes.json().ok, true);
+
+    const stateAfterAuto = (await invokeHandler(handler, 'GET', '/api/state')).json();
+    assert.equal(stateAfterAuto.auto.exact['Auto Discover Item'], '自動発見項目');
+
+    const delAutoRes = await invokeHandler(handler, 'DELETE', '/api/custom', {
+      en: 'Temp Auto Item',
+      source: 'auto',
+    });
+    assert.equal(delAutoRes.status, 200);
+
+    const clearAutoRes = await invokeHandler(handler, 'POST', '/api/action/clear-auto', {});
+    assert.equal(clearAutoRes.status, 200);
+    const stateAfterClear = (await invokeHandler(handler, 'GET', '/api/state')).json();
+    assert.equal(Object.keys(stateAfterClear.auto.exact).length, 0);
 
     const evilOriginRes = await invokeHandler(
       handler,
@@ -282,7 +375,7 @@ test('Windows batch and VBScript launchers are pure ASCII with CRLF line endings
   }
 });
 
-test('Launcher handles fast launch, unpatched auto-patch splash flow, and desktop shortcuts in temp dir', (t) => {
+test('Launcher handles fast launch, unpatched auto-patch splash flow, and desktop shortcuts in temp dir', async (t) => {
   const realPaths = resolveAntigravityPaths();
   if (!fs.existsSync(realPaths.asarPath)) {
     t.skip('Installed Antigravity app.asar not found');
@@ -309,13 +402,34 @@ test('Launcher handles fast launch, unpatched auto-patch splash flow, and deskto
     let splashClosed = false;
     let launchedExe = null;
 
-    // 1. Unpatched -> should show "日本語化中" splash, auto-patch, close splash, and launch exe
-    const resAutoPatch = launchAntigravity({
+    fs.mkdirSync(tmpUserDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpUserDir, 'untranslated.json'),
+      JSON.stringify({
+        items: {
+          'New Update Toggle': { count: 2, tags: ['BUTTON'], roles: ['button'], attrs: [] },
+        },
+      }),
+      'utf8'
+    );
+
+    // 1. Unpatched -> should show "日本語化中" splash, auto-patch, auto-translate pending items, close splash, and launch exe
+    const resAutoPatch = await launchAntigravity({
       installDir: tmpInstallDir,
       userDataDir: tmpUserDir,
       gui: true,
       skipRunningCheck: true,
       _isRunning: () => false,
+      _fetch: async (url) => {
+        const q = new URL(url).searchParams.get('q') || '';
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return [[['新アップデート切替', q]]];
+          },
+        };
+      },
       _spawnSplash(opts) {
         splashTitle = opts.title;
         return {
@@ -331,15 +445,18 @@ test('Launcher handles fast launch, unpatched auto-patch splash flow, and deskto
 
     assert.equal(resAutoPatch.launched, true);
     assert.equal(resAutoPatch.patchedNow, true);
+    assert.equal(resAutoPatch.autoTranslatedCount, 1);
     assert.equal(splashTitle, '日本語化中');
     assert.equal(splashClosed, true);
     assert.equal(launchedExe, tmpExe);
     assert.equal(isAppPatchedFast(tmpAsar), true);
+    const launchAutoJson = JSON.parse(fs.readFileSync(path.join(tmpUserDir, 'auto.json'), 'utf8'));
+    assert.equal(launchAutoJson.exact['New Update Toggle'], '新アップデート切替');
 
     // 2. Already patched -> fast launch without splash or re-patching
     let secondSplashOpened = false;
     let secondLaunched = null;
-    const resFast = launchAntigravity({
+    const resFast = await launchAntigravity({
       installDir: tmpInstallDir,
       userDataDir: tmpUserDir,
       gui: true,
@@ -447,7 +564,15 @@ test('jaI18nMain broadcasts updates to WebContentsView and subscribed webContent
     const wrapped = `(function(require, module, exports, __filename, __dirname) {\n${mainCode}\n})`;
     const compiledFn = new vm.Script(wrapped, { filename: 'jaI18nMain.js' }).runInThisContext();
     compiledFn(
-      (id) => (id === 'electron' ? mockElectron : require(id)),
+      (id) => {
+        if (id === 'electron') {
+          return mockElectron;
+        }
+        if (id.startsWith('.')) {
+          return require(path.resolve(path.dirname(mainSrcPath), id));
+        }
+        return require(id);
+      },
       mod,
       mod.exports,
       mainSrcPath,
@@ -455,6 +580,16 @@ test('jaI18nMain broadcasts updates to WebContentsView and subscribed webContent
     );
 
     mod.exports.initJaI18n();
+    mod.exports._setAutoTranslateFetcher(async (url) => {
+      const q = new URL(url).searchParams.get('q') || '';
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [[['真新しいボタン', q]]];
+        },
+      };
+    });
 
     const getBundleHandler = ipcHandlers.get('antigravity-ja:get-bundle');
     const toggleHandler = ipcHandlers.get('antigravity-ja:toggle');
@@ -488,6 +623,27 @@ test('jaI18nMain broadcasts updates to WebContentsView and subscribed webContent
     );
     const refreshed = await getBundleHandler({ sender: hubWc });
     assert.equal(refreshed.exact.World, '世界');
+
+    // Runtime live auto-discovery + background auto-translation broadcasts updated bundle to hubWc
+    const reportListener = ipcListeners.get('antigravity-ja:report-untranslated');
+    assert.equal(typeof reportListener, 'function');
+    // Re-enable localization and ensure autoTranslate config is active
+    await toggleHandler({ sender: hubWc });
+    const prevHubSentLen = hubWc.sent.length;
+    reportListener({ sender: hubWc }, [
+      { text: 'Brand New Button', count: 1, tags: ['BUTTON'], roles: ['button'], attrs: [], inTooltip: false },
+      { text: 'scratch', count: 1, tags: ['SPAN'], roles: [], attrs: [], inTooltip: false },
+    ]);
+    const flushRes = await mod.exports._flushAutoTranslateQueueForTest();
+    assert.equal(flushRes.translated, 1);
+
+    const runtimeAuto = JSON.parse(fs.readFileSync(path.join(tmpUserDir, 'auto.json'), 'utf8'));
+    assert.equal(runtimeAuto.exact['Brand New Button'], '真新しいボタン');
+    assert.equal(runtimeAuto.exact.scratch, undefined);
+    assert.ok(hubWc.sent.length > prevHubSentLen);
+    const lastBroadcast = hubWc.sent[hubWc.sent.length - 1];
+    assert.equal(lastBroadcast.channel, 'antigravity-ja:bundle-updated');
+    assert.equal(lastBroadcast.payload.exact['Brand New Button'], '真新しいボタン');
   } finally {
     mockApp.emit('will-quit');
     if (prevEnv === undefined) {

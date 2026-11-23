@@ -22,6 +22,7 @@ const {
   openDirectoryInExplorer,
 } = require('./launcher');
 const { applyPatch, getStatus, restorePatch } = require('./patcher');
+const { DEFAULT_AUTO_CONFIG, runAutoTranslateForUserDir, validateEndpointUrl } = require('./runtime/autoTranslator');
 const { compileBundle } = require('./runtime/translatorCore');
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -106,13 +107,9 @@ function getFilteredUntranslated(userDataDir, untranslatedItems) {
 
 function buildStatePayload(userDataDir, installDir) {
   const files = ensureUserDataDir(userDataDir, { refreshBaseDict: false });
-  const config = readJsonSafe(files.configPath, {
-    enabled: true,
-    collectUntranslated: false,
-    autoCollectTooltips: true,
-    japaneseTypography: true,
-  });
+  const config = readJsonSafe(files.configPath, { ...DEFAULT_AUTO_CONFIG });
   const baseDict = readJsonSafe(files.baseDictPath, loadBaseDictionary());
+  const auto = readJsonSafe(files.autoDictPath, { exact: {}, meta: {} });
   const custom = readJsonSafe(files.customDictPath, { exact: {}, patterns: [], ignored: [] });
   const untranslated = readJsonSafe(files.untranslatedPath, { items: {} });
   const glossary = loadGlossary();
@@ -120,6 +117,7 @@ function buildStatePayload(userDataDir, installDir) {
   const shortcuts = getShortcutPaths();
 
   const baseFlat = flattenExactMap(baseDict);
+  const autoExact = auto && auto.exact && typeof auto.exact === 'object' && !Array.isArray(auto.exact) ? auto.exact : {};
   const customExact = custom && custom.exact && typeof custom.exact === 'object' ? custom.exact : {};
   const rawUntranslated =
     untranslated && untranslated.items && typeof untranslated.items === 'object' ? untranslated.items : {};
@@ -137,9 +135,21 @@ function buildStatePayload(userDataDir, installDir) {
       collectUntranslated: Boolean(config?.collectUntranslated),
       autoCollectTooltips: config?.autoCollectTooltips !== false,
       japaneseTypography: config?.japaneseTypography !== false,
+      autoTranslate: config?.autoTranslate !== false,
+      autoTranslateProvider:
+        typeof config?.autoTranslateProvider === 'string' &&
+        ['free', 'gemini', 'openai', 'ollama'].includes(config.autoTranslateProvider)
+          ? config.autoTranslateProvider
+          : 'free',
+      autoTranslateModel: typeof config?.autoTranslateModel === 'string' ? config.autoTranslateModel : '',
+      autoTranslateEndpoint: typeof config?.autoTranslateEndpoint === 'string' ? config.autoTranslateEndpoint : '',
+      hasApiKey: Boolean(typeof config?.autoTranslateApiKey === 'string' && config.autoTranslateApiKey.trim()),
     },
     categories: baseDict.categories || {},
     basePatterns: Array.isArray(baseDict.patterns) ? baseDict.patterns : [],
+    auto: {
+      exact: autoExact,
+    },
     custom: {
       exact: customExact,
       patterns: Array.isArray(custom.patterns) ? custom.patterns : [],
@@ -150,6 +160,7 @@ function buildStatePayload(userDataDir, installDir) {
     stats: {
       baseCount: Object.keys(baseFlat).length,
       basePatternCount: Array.isArray(baseDict.patterns) ? baseDict.patterns.length : 0,
+      autoCount: Object.keys(autoExact).length,
       customExactCount: Object.keys(customExact).length,
       customPatternCount: Array.isArray(custom.patterns) ? custom.patterns.length : 0,
       ignoredCount: Array.isArray(custom.ignored) ? custom.ignored.length : 0,
@@ -344,7 +355,7 @@ function renderAppHtml() {
     align-items: center;
     margin-bottom: 14px;
   }
-  input[type="text"], select, textarea {
+  input[type="text"], input[type="password"], select, textarea {
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text);
@@ -353,7 +364,7 @@ function renderAppHtml() {
     font-size: 13px;
     font-family: inherit;
   }
-  input[type="text"]:focus, select:focus, textarea:focus {
+  input[type="text"]:focus, input[type="password"]:focus, select:focus, textarea:focus {
     outline: none;
     border-color: var(--accent);
   }
@@ -418,6 +429,11 @@ function renderAppHtml() {
     border-color: rgba(96, 165, 250, 0.4);
     color: #bfdbfe;
   }
+  .badge.auto {
+    background: rgba(168, 85, 247, 0.16);
+    border-color: rgba(168, 85, 247, 0.45);
+    color: #e9d5ff;
+  }
   .row-actions {
     display: flex;
     gap: 6px;
@@ -467,6 +483,7 @@ function renderAppHtml() {
     <div class="controls-bar">
       <span id="hdrPatchPill" class="pill">確認中...</span>
       <span class="pill">基本辞書 <strong id="statBase">0</strong></span>
+      <span class="pill">自動翻訳 <strong id="statAuto">0</strong></span>
       <span class="pill">カスタム <strong id="statCustom">0</strong></span>
       <span class="pill">未翻訳 <strong id="statUntranslated">0</strong></span>
     </div>
@@ -523,6 +540,33 @@ function renderAppHtml() {
       </div>
       <div class="subtitle">
         本体アップデートで英語に戻ったときも、デスクトップの「Antigravity (日本語)」または上の「日本語で Antigravity を起動」から開けば、自動で「日本語化中...」を表示して日本語版へ戻します。
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="toolbar" style="justify-content:space-between;margin-bottom:10px">
+        <div>
+          <h2 style="margin:0;font-size:15px">アプデ新UI 自動発見＆自動翻訳</h2>
+          <div class="subtitle">新しい英語UIやツールチップを自動で発見・翻訳して <span class="mono">auto.json</span> にキャッシュします（チャット本文・コード・パスは送信しません）。</div>
+        </div>
+        <span id="autoCachePill" class="pill">自動翻訳キャッシュ <strong id="stAutoCacheCount">0</strong> 件</span>
+      </div>
+      <div class="toolbar" style="margin-bottom:10px">
+        <button id="btnToggleAutoTranslate" class="switch-btn">新UI自動翻訳: -</button>
+        <select id="autoProvider">
+          <option value="free">無料翻訳（APIキー不要）</option>
+          <option value="gemini">Gemini API（より自然なUI訳）</option>
+          <option value="openai">OpenAI API（GPT）</option>
+          <option value="ollama">ローカル Ollama（完全オフライン）</option>
+        </select>
+        <button id="btnRunAutoTranslate" class="primary">未翻訳UIを今すぐ自動翻訳</button>
+        <button id="btnClearAutoCache" class="danger">自動キャッシュをクリア</button>
+      </div>
+      <div id="autoProviderCreds" class="toolbar" style="display:none;margin-bottom:0">
+        <input id="autoApiKey" type="password" placeholder="APIキー (未入力なら既存設定/環境変数を維持)" style="flex:1;min-width:220px" />
+        <input id="autoModel" type="text" placeholder="モデル名 (省略可: 例 gemini-2.5-flash)" style="width:230px" />
+        <input id="autoEndpoint" type="text" placeholder="エンドポイントURL (省略可)" style="flex:1;min-width:220px" />
+        <button id="btnSaveAutoConfig" class="primary">翻訳エンジン設定を保存</button>
       </div>
     </div>
   </section>
@@ -646,9 +690,11 @@ function renderAppHtml() {
   function renderHeaderAndHome() {
     document.getElementById('userDir').textContent = state.userDataDir || '';
     document.getElementById('statBase').textContent = state.stats.baseCount;
+    document.getElementById('statAuto').textContent = state.stats.autoCount || 0;
     document.getElementById('statCustom').textContent = state.stats.customExactCount;
     document.getElementById('statUntranslated').textContent = state.stats.untranslatedCount;
     document.getElementById('tabUntranslatedCount').textContent = state.stats.untranslatedCount;
+    document.getElementById('stAutoCacheCount').textContent = state.stats.autoCount || 0;
 
     const app = state.appStatus || {};
     const pill = document.getElementById('hdrPatchPill');
@@ -692,6 +738,29 @@ function renderAppHtml() {
     const btnTypo = document.getElementById('btnToggleTypography');
     btnTypo.textContent = state.config.japaneseTypography ? '日本語フォント最適化 (lang=ja): ON' : '日本語フォント最適化 (lang=ja): OFF';
     btnTypo.classList.toggle('on', state.config.japaneseTypography);
+
+    const btnAutoTr = document.getElementById('btnToggleAutoTranslate');
+    btnAutoTr.textContent = state.config.autoTranslate ? '新UI自動翻訳: ON' : '新UI自動翻訳: OFF';
+    btnAutoTr.classList.toggle('on', state.config.autoTranslate);
+
+    const provEl = document.getElementById('autoProvider');
+    const prov = state.config.autoTranslateProvider || 'free';
+    provEl.value = prov;
+    const credsEl = document.getElementById('autoProviderCreds');
+    credsEl.style.display = prov === 'free' ? 'none' : 'flex';
+    const keyInput = document.getElementById('autoApiKey');
+    keyInput.style.display = prov === 'ollama' ? 'none' : '';
+    keyInput.placeholder = state.config.hasApiKey
+      ? 'APIキー設定済み（変更時のみ入力）'
+      : 'APIキー (未入力なら環境変数を使用)';
+    const modelInput = document.getElementById('autoModel');
+    if (document.activeElement !== modelInput) {
+      modelInput.value = state.config.autoTranslateModel || '';
+    }
+    const epInput = document.getElementById('autoEndpoint');
+    if (document.activeElement !== epInput) {
+      epInput.value = state.config.autoTranslateEndpoint || '';
+    }
   }
 
   function renderUntranslated() {
@@ -727,7 +796,11 @@ function renderAppHtml() {
   function renderCategoryFilter() {
     const sel = document.getElementById('categoryFilter');
     const prev = sel.value || 'all';
-    const opts = ['<option value="all">すべてのカテゴリ</option>', '<option value="custom">カスタムのみ</option>'];
+    const opts = [
+      '<option value="all">すべてのカテゴリ</option>',
+      '<option value="custom">カスタムのみ</option>',
+      '<option value="auto">自動翻訳のみ</option>',
+    ];
     for (const [id, cat] of Object.entries(state.categories || {})) {
       opts.push('<option value="' + escHtml(id) + '">' + escHtml(cat.label || id) + '</option>');
     }
@@ -740,6 +813,7 @@ function renderAppHtml() {
     const catFilter = document.getElementById('categoryFilter').value;
     const onlyCustom = document.getElementById('onlyCustom').checked;
     const customExact = state.custom.exact || {};
+    const autoExact = (state.auto && state.auto.exact) || {};
     const rowsData = [];
     const seen = new Set();
 
@@ -748,12 +822,28 @@ function renderAppHtml() {
         seen.add(en);
         const isCustom = Object.prototype.hasOwnProperty.call(customExact, en);
         const currentJa = isCustom ? customExact[en] : baseJa;
-        rowsData.push({ en, ja: currentJa, baseJa, catId, catLabel: cat.label || catId, isCustom });
+        rowsData.push({ en, ja: currentJa, baseJa, catId, catLabel: cat.label || catId, isCustom, isAuto: false });
+      }
+    }
+    for (const [en, autoJa] of Object.entries(autoExact)) {
+      if (!seen.has(en)) {
+        seen.add(en);
+        const isCustom = Object.prototype.hasOwnProperty.call(customExact, en);
+        const currentJa = isCustom ? customExact[en] : autoJa;
+        rowsData.push({
+          en,
+          ja: currentJa,
+          baseJa: isCustom ? autoJa : null,
+          catId: isCustom ? 'custom' : 'auto',
+          catLabel: isCustom ? 'カスタム追加' : '自動翻訳',
+          isCustom,
+          isAuto: !isCustom,
+        });
       }
     }
     for (const [en, ja] of Object.entries(customExact)) {
       if (!seen.has(en)) {
-        rowsData.push({ en, ja, baseJa: null, catId: 'custom', catLabel: 'カスタム追加', isCustom: true });
+        rowsData.push({ en, ja, baseJa: null, catId: 'custom', catLabel: 'カスタム追加', isCustom: true, isAuto: false });
       }
     }
 
@@ -761,7 +851,8 @@ function renderAppHtml() {
       if (onlyCustom && !r.isCustom) return false;
       if (catFilter !== 'all') {
         if (catFilter === 'custom' && !r.isCustom) return false;
-        if (catFilter !== 'custom' && r.catId !== catFilter) return false;
+        if (catFilter === 'auto' && !r.isAuto) return false;
+        if (catFilter !== 'custom' && catFilter !== 'auto' && r.catId !== catFilter) return false;
       }
       if (q) {
         return r.en.toLowerCase().includes(q) || r.ja.toLowerCase().includes(q);
@@ -778,10 +869,14 @@ function renderAppHtml() {
     const html = filtered.slice(0, 300).map((r) => {
       const badge = r.isCustom
         ? '<span class="badge custom">カスタム</span>'
-        : '<span class="badge">' + escHtml(r.catLabel) + '</span>';
+        : r.isAuto
+          ? '<span class="badge auto">自動翻訳</span>'
+          : '<span class="badge">' + escHtml(r.catLabel) + '</span>';
       const resetBtn = r.isCustom
         ? '<button class="danger act-reset">' + (r.baseJa ? '元に戻す' : '削除') + '</button>'
-        : '';
+        : r.isAuto
+          ? '<button class="danger act-reset-auto">削除</button>'
+          : '';
       return (
         '<tr data-en="' + escHtml(r.en) + '">' +
           '<td class="mono">' + escHtml(r.en) + '<div>' + badge + '</div></td>' +
@@ -919,6 +1014,59 @@ function renderAppHtml() {
     showToast(state.config.japaneseTypography ? '日本語フォント最適化をONにしました' : '日本語フォント最適化をOFFにしました');
   }));
 
+  document.getElementById('btnToggleAutoTranslate').addEventListener('click', () => runSafe(async () => {
+    await api('POST', '/api/config', { autoTranslate: !state.config.autoTranslate });
+    await refreshState();
+    showToast(state.config.autoTranslate ? '新UI自動翻訳をONにしました' : '新UI自動翻訳をOFFにしました');
+  }));
+
+  document.getElementById('autoProvider').addEventListener('change', (ev) => runSafe(async () => {
+    const provider = ev.target.value;
+    document.getElementById('autoProviderCreds').style.display = provider === 'free' ? 'none' : 'flex';
+    await api('POST', '/api/config', { autoTranslateProvider: provider });
+    await refreshState();
+    showToast('自動翻訳エンジンを切り替えました: ' + provider);
+  }));
+
+  document.getElementById('btnSaveAutoConfig').addEventListener('click', () => runSafe(async () => {
+    const provider = document.getElementById('autoProvider').value;
+    const apiKey = document.getElementById('autoApiKey').value.trim();
+    const model = document.getElementById('autoModel').value.trim();
+    const endpoint = document.getElementById('autoEndpoint').value.trim();
+    const payload = {
+      autoTranslateProvider: provider,
+      autoTranslateModel: model,
+      autoTranslateEndpoint: endpoint,
+    };
+    if (apiKey) {
+      payload.autoTranslateApiKey = apiKey;
+      document.getElementById('autoApiKey').value = '';
+    }
+    await api('POST', '/api/config', payload);
+    await refreshState();
+    showToast('自動翻訳エンジンの設定を保存しました');
+  }));
+
+  document.getElementById('btnRunAutoTranslate').addEventListener('click', (ev) => {
+    const btn = ev.currentTarget;
+    void withBusyButton(btn, '自動翻訳中...', async () => {
+      const res = await api('POST', '/api/action/auto-translate', {});
+      await refreshState();
+      if (res.error) {
+        showToast('自動翻訳エラー: ' + res.error);
+      } else {
+        showToast('自動翻訳完了: ' + (res.translated || 0) + '件を反映しました');
+      }
+    });
+  });
+
+  document.getElementById('btnClearAutoCache').addEventListener('click', () => runSafe(async () => {
+    if (!confirm('自動翻訳キャッシュ (auto.json) をクリアしますか？')) return;
+    await api('POST', '/api/action/clear-auto', {});
+    await refreshState();
+    showToast('自動翻訳キャッシュをクリアしました');
+  }));
+
   document.getElementById('btnRefresh').addEventListener('click', () => runSafe(async () => {
     await refreshState();
     showToast('再読み込みしました');
@@ -1009,6 +1157,10 @@ function renderAppHtml() {
       await api('DELETE', '/api/custom', { en });
       await refreshState();
       showToast('カスタム上書きを解除しました');
+    } else if (ev.target.classList.contains('act-reset-auto')) {
+      await api('DELETE', '/api/custom', { en, source: 'auto' });
+      await refreshState();
+      showToast('自動翻訳エントリを削除しました');
     }
   }));
 
@@ -1136,8 +1288,27 @@ function createAppHandler(userDataDir, options = {}) {
       }
 
       if (req.method === 'POST' && pathname === '/api/action/launch') {
-        const resLaunch = launchAntigravity({ installDir, userDataDir, gui: true });
+        const resLaunch = await launchAntigravity({ installDir, userDataDir, gui: true, _fetch: options._fetch });
         sendJson(res, 200, { ok: true, ...resLaunch });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/action/auto-translate') {
+        const resAuto = await runAutoTranslateForUserDir(userDataDir, {
+          maxItems: 60,
+          timeoutMs: 15000,
+          force: true,
+          glossary: loadGlossary(),
+          _fetch: options._fetch,
+        });
+        sendJson(res, 200, { ok: true, ...resAuto });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/action/clear-auto') {
+        const files = ensureUserDataDir(userDataDir, { refreshBaseDict: false });
+        writeJsonAtomic(files.autoDictPath, { exact: {}, meta: {} });
+        sendJson(res, 200, { ok: true });
         return;
       }
 
@@ -1210,6 +1381,14 @@ function createAppHandler(userDataDir, options = {}) {
             return;
           }
           custom.exact[en] = ja;
+          const autoDict = readJsonSafe(files.autoDictPath, { exact: {}, meta: {} });
+          if (autoDict && autoDict.exact && Object.prototype.hasOwnProperty.call(autoDict.exact, en)) {
+            delete autoDict.exact[en];
+            if (autoDict.meta && Object.prototype.hasOwnProperty.call(autoDict.meta, en)) {
+              delete autoDict.meta[en];
+            }
+            writeJsonAtomic(files.autoDictPath, autoDict);
+          }
           const untranslated = readJsonSafe(files.untranslatedPath, { items: {} });
           if (untranslated && untranslated.items && Object.prototype.hasOwnProperty.call(untranslated.items, en)) {
             delete untranslated.items[en];
@@ -1224,6 +1403,16 @@ function createAppHandler(userDataDir, options = {}) {
       if (req.method === 'DELETE' && pathname === '/api/custom') {
         const body = await readRequestBody(req);
         const files = ensureUserDataDir(userDataDir, { refreshBaseDict: false });
+        if (body.source === 'auto') {
+          const autoDict = readJsonSafe(files.autoDictPath, { exact: {}, meta: {} });
+          if (typeof body.en === 'string' && autoDict && autoDict.exact) {
+            delete autoDict.exact[body.en];
+            if (autoDict.meta) delete autoDict.meta[body.en];
+            writeJsonAtomic(files.autoDictPath, autoDict);
+          }
+          sendJson(res, 200, { ok: true });
+          return;
+        }
         const custom = readJsonSafe(files.customDictPath, { exact: {}, patterns: [], ignored: [] });
         if (typeof body.en === 'string' && custom.exact) {
           delete custom.exact[body.en];
@@ -1279,12 +1468,33 @@ function createAppHandler(userDataDir, options = {}) {
       if (req.method === 'POST' && pathname === '/api/config') {
         const body = await readRequestBody(req);
         const files = ensureUserDataDir(userDataDir, { refreshBaseDict: false });
-        const prev = readJsonSafe(files.configPath, {
-          enabled: true,
-          collectUntranslated: false,
-          autoCollectTooltips: true,
-          japaneseTypography: true,
-        });
+        const prev = readJsonSafe(files.configPath, { ...DEFAULT_AUTO_CONFIG });
+        const rawProv =
+          typeof body.autoTranslateProvider === 'string'
+            ? body.autoTranslateProvider
+            : prev.autoTranslateProvider || 'free';
+        const nextProvider = ['free', 'gemini', 'openai', 'ollama'].includes(rawProv) ? rawProv : 'free';
+        const nextApiKey = body.clearApiKey
+          ? ''
+          : typeof body.autoTranslateApiKey === 'string' && body.autoTranslateApiKey.trim()
+            ? body.autoTranslateApiKey.trim()
+            : typeof prev.autoTranslateApiKey === 'string'
+              ? prev.autoTranslateApiKey
+              : '';
+        const rawEndpoint =
+          typeof body.autoTranslateEndpoint === 'string'
+            ? body.autoTranslateEndpoint.trim()
+            : typeof prev.autoTranslateEndpoint === 'string'
+              ? prev.autoTranslateEndpoint
+              : '';
+        if (typeof body.autoTranslateEndpoint === 'string' && rawEndpoint) {
+          try {
+            validateEndpointUrl(rawEndpoint);
+          } catch (err) {
+            sendJson(res, 400, { error: err && err.message ? err.message : String(err) });
+            return;
+          }
+        }
         const next = {
           enabled: typeof body.enabled === 'boolean' ? body.enabled : prev.enabled !== false,
           collectUntranslated:
@@ -1299,9 +1509,35 @@ function createAppHandler(userDataDir, options = {}) {
             typeof body.japaneseTypography === 'boolean'
               ? body.japaneseTypography
               : prev.japaneseTypography !== false,
+          autoTranslate:
+            typeof body.autoTranslate === 'boolean'
+              ? body.autoTranslate
+              : prev.autoTranslate !== false,
+          autoTranslateProvider: nextProvider,
+          autoTranslateApiKey: nextApiKey,
+          autoTranslateModel:
+            typeof body.autoTranslateModel === 'string'
+              ? body.autoTranslateModel.trim()
+              : typeof prev.autoTranslateModel === 'string'
+                ? prev.autoTranslateModel
+                : '',
+          autoTranslateEndpoint: rawEndpoint,
         };
         writeJsonAtomic(files.configPath, next);
-        sendJson(res, 200, { ok: true, config: next });
+        sendJson(res, 200, {
+          ok: true,
+          config: {
+            enabled: next.enabled,
+            collectUntranslated: next.collectUntranslated,
+            autoCollectTooltips: next.autoCollectTooltips,
+            japaneseTypography: next.japaneseTypography,
+            autoTranslate: next.autoTranslate,
+            autoTranslateProvider: next.autoTranslateProvider,
+            autoTranslateModel: next.autoTranslateModel,
+            autoTranslateEndpoint: next.autoTranslateEndpoint,
+            hasApiKey: Boolean(next.autoTranslateApiKey),
+          },
+        });
         return;
       }
 

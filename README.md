@@ -9,9 +9,13 @@ Antigravity App（Antigravity 2.0 デスクトップアプリ）のUIを、自�
 - **統合アプリ画面 (`Antigravity-JA.bat`)**: パッチの適用・復元・自動起動ショートカット作成・辞書同期・未翻訳収集・ライブ辞書編集までを 1 つの専用アプリウィンドウから操作できます（黒いコンソール画面は出ません）。
 - **アップデート後も自動で日本語化 (`Antigravity-Launch.bat` / デスクトップショートカット)**:
   - すでに日本語化済みなら待ち時間ゼロで即起動
-  - Antigravity 本体が自動アップデートされて英語に戻っていた場合は、**「日本語化中...」** のスプラッシュ表示とともに自動で最新パッチを再適用してから起動します
+  - Antigravity 本体が自動アップデートされて英語に戻っていた場合は、**「日本語化中...」** のスプラッシュ表示とともに自動で最新パッチを再適用し、未翻訳の新規UIも自動翻訳してから起動します
+- **アプデ新UI 自動発見＆自動翻訳 (`auto.json`)**:
+  - 起動時（未適用・アプデ検出時）および Antigravity 使用中のバックグラウンドで、安全フィルタを通過した新規英語UI・ツールチップを自動発見して即時日本語化し、`%USERPROFILE%\.antigravity-ja\auto.json` へ永続キャッシュします
+  - 無料のキー不要エンジン（`free`）に加え、Gemini API / OpenAI API / ローカル Ollama への切り替えやON/OFFを統合管理アプリから設定可能
+  - チャット本文・コード・ターミナル出力・APIキー・URL・ローカルパス等は厳格に除外されるプライバシー設計で、優先度は **`custom.json` > `ja-base.json` (`dictionary.json`) > `auto.json`** です
 - **安全なリバーシブル適用**: 初回適用時に元の `app.asar` を `app.asar.ja-backup`（SHA-256 検証付き）としてバックアップし、ワンクリックでいつでも元の英語UIへ完全復元できます。
-- **自然な日本語辞書＋動的パターン**: **1,919件**の基本UI辞書（9カテゴリ）と **190件**の動的正規表現パターン（思考時間、作業時間、変更ファイル数、モデル説明ツールチップ、クォータ残量、エージェント実行ステップ、トークン使用量、相対時刻など）を搭載。設定やカスタム翻訳は `%USERPROFILE%\.antigravity-ja\` に保持されるため、本体アップデートで消えません。
+- **自然な日本語辞書＋動的パターン**: **1,935件**の基本UI辞書（9カテゴリ）と **191件**の動的正規表現パターン（思考時間、作業時間、変更ファイル数、モデル説明ツールチップ、クォータ残量、エージェント実行ステップ、トークン使用量、相対時刻など）を搭載。設定やカスタム翻訳は `%USERPROFILE%\.antigravity-ja\` に保持されるため、本体アップデートで消えません。
 - **チャット本文・コード・ターミナルを保護**: `<code>`・`<pre>`・`<textarea>`・`[contenteditable]`・Monaco エディタ・ターミナル（`.xterm`）・AIのチャット応答本文は翻訳せず、ボタンやメニュー等のUI要素だけを安全に日本語化します。
 - **日本語フォント最適化（`lang="ja"`）& ライブ反映**: Chromium の日本語字体適用で漢字の字体崩れを防ぎ、Antigravity 画面上の `Ctrl+Alt+J` で ON / OFF、辞書編集も再起動なしで即時反映されます。
 
@@ -66,6 +70,7 @@ node src/cli.js status               # 適用状態・バックアップ・辞�
 node src/cli.js apply                # パッチ適用
 node src/cli.js restore              # バックアップから完全復元
 node src/cli.js sync                 # 最新の基本辞書をユーザーフォルダへ同期
+node src/cli.js auto-translate       # 未翻訳の安全な英語UIを自動翻訳して auto.json に保存
 node src/cli.js validate             # 辞書・用語集の構文検証
 node src/cli.js export-untranslated  # AI一括翻訳用プロンプトを出力
 node src/cli.js import <file.json>   # 翻訳JSONをカスタム辞書へマージ
@@ -85,7 +90,7 @@ antigravity-ja/
 │   ├── app-silent.vbs             # 黒い画面なしで統合アプリを起動するラッパー
 │   └── launch-silent.vbs          # 黒い画面なしで自動日本語化起動を行うラッパー
 ├── dictionaries/
-│   ├── ja-base.json               # 基本UI辞書（1,919件）＋ 動的パターン（190件）
+│   ├── ja-base.json               # 基本UI辞書（1,935件）＋ 動的パターン（191件）
 │   └── glossary.json              # 翻訳用語集・トーンガイドライン
 ├── src/
 │   ├── appServer.js               # 統合管理アプリ & 辞書エディタのローカルサーバー (127.0.0.1)
@@ -96,6 +101,7 @@ antigravity-ja/
 │   ├── patcher.js                 # パッチ適用／バックアップ検証／復元ロジック
 │   ├── paths.js                   # インストール先・ユーザー辞書パス解決
 │   └── runtime/
+│       ├── autoTranslator.js      # アプデ新UI自動発見・安全フィルタ・4種翻訳エンジン連携
 │       ├── jaI18nMain.js          # Electron メインプロセス連携（IPC/トレイ/WebContentsView監視）
 │       ├── preloadBuilder.js      # サンドボックス対応 Preload スクリプト生成
 │       └── translatorCore.js      # 翻訳・除外判定コアロジック

@@ -6,7 +6,7 @@ const os = require('os');
 const path = require('path');
 
 const { readAsarFile } = require('./asar');
-const { ensureUserDataDir, pruneTranslatedFromUntranslated } = require('./dictionary');
+const { ensureUserDataDir, loadGlossary, pruneTranslatedFromUntranslated } = require('./dictionary');
 const { MAIN_START_MARKER, applyPatch, isAntigravityRunning } = require('./patcher');
 const {
   PACKAGE_ROOT,
@@ -14,6 +14,7 @@ const {
   getUserDataFiles,
   resolveAntigravityPaths,
 } = require('./paths');
+const { runAutoTranslateForUserDir } = require('./runtime/autoTranslator');
 const { PRELOAD_START_MARKER } = require('./runtime/preloadBuilder');
 
 let cachedDesktopDir = null;
@@ -57,7 +58,8 @@ function isAppPatchedFast(asarPath) {
     const mainBuf = readAsarFile(asarPath, 'dist/main.js');
     const preloadBuf = readAsarFile(asarPath, 'dist/preload.js');
     const jaMainBuf = readAsarFile(asarPath, 'dist/jaI18nMain.js');
-    if (!mainBuf || !preloadBuf || !jaMainBuf) {
+    const jaAutoBuf = readAsarFile(asarPath, 'dist/jaAutoTranslator.js');
+    if (!mainBuf || !preloadBuf || !jaMainBuf || !jaAutoBuf) {
       return false;
     }
     return (
@@ -443,6 +445,8 @@ function defaultSpawnExe(exePath, args) {
  *   gui?: boolean,
  *   passThroughArgs?: string[],
  *   skipRunningCheck?: boolean,
+ *   skipAutoTranslate?: boolean,
+ *   _fetch?: Function,
  *   _spawnExe?: Function,
  *   _spawnSplash?: Function,
  *   _showDialog?: Function,
@@ -452,7 +456,7 @@ function defaultSpawnExe(exePath, args) {
  *   _syncStale?: Function
  * }} [options]
  */
-function launchAntigravity(options = {}) {
+async function launchAntigravity(options = {}) {
   const paths = resolveAntigravityPaths(options.installDir);
   const gui = Boolean(options.gui);
   const passThroughArgs = Array.isArray(options.passThroughArgs) ? options.passThroughArgs : [];
@@ -510,9 +514,23 @@ function launchAntigravity(options = {}) {
         userDataDir: options.userDataDir,
         skipRunningCheck: Boolean(options.skipRunningCheck),
       });
+      let autoTranslatedCount = 0;
+      if (!options.skipAutoTranslate) {
+        try {
+          const autoRes = await runAutoTranslateForUserDir(options.userDataDir, {
+            maxItems: 40,
+            timeoutMs: 6000,
+            glossary: loadGlossary(),
+            _fetch: options._fetch,
+          });
+          autoTranslatedCount = autoRes && Number.isFinite(autoRes.translated) ? autoRes.translated : 0;
+        } catch {
+          // Never block Antigravity launch on network or translation error
+        }
+      }
       splash.close();
       spawnExeFn(paths.exePath, passThroughArgs);
-      return { launched: true, patchedNow: true };
+      return { launched: true, patchedNow: true, autoTranslatedCount };
     } catch (err) {
       splash.close();
       if (err && (err.code === 'EBUSY' || err.code === 'EPERM') && gui) {

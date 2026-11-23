@@ -112,6 +112,18 @@ function ensureUserDataDir(userDataDir, options = {}) {
       collectUntranslated: false,
       autoCollectTooltips: true,
       japaneseTypography: true,
+      autoTranslate: true,
+      autoTranslateProvider: 'free',
+      autoTranslateApiKey: '',
+      autoTranslateModel: '',
+      autoTranslateEndpoint: '',
+    });
+  }
+
+  if (!fs.existsSync(files.autoDictPath)) {
+    writeJsonAtomic(files.autoDictPath, {
+      exact: {},
+      meta: {},
     });
   }
 
@@ -145,10 +157,16 @@ function loadMergedBundle(userDataDir) {
     collectUntranslated: false,
     autoCollectTooltips: true,
     japaneseTypography: true,
+    autoTranslate: true,
   });
 
   const baseDict =
     readJsonSafe(files.baseDictPath, null) || readJsonSafe(bundled.baseDictPath, { categories: {}, patterns: [] });
+
+  const autoDict = readJsonSafe(files.autoDictPath, {
+    exact: {},
+    meta: {},
+  });
 
   const customDict = readJsonSafe(files.customDictPath, {
     exact: {},
@@ -156,13 +174,28 @@ function loadMergedBundle(userDataDir) {
     ignored: [],
   });
 
+  const autoExact =
+    autoDict && autoDict.exact && typeof autoDict.exact === 'object' && !Array.isArray(autoDict.exact)
+      ? autoDict.exact
+      : {};
   const baseExact = flattenExactMap(baseDict);
   const customExact =
     customDict && customDict.exact && typeof customDict.exact === 'object' && !Array.isArray(customDict.exact)
       ? customDict.exact
       : {};
 
-  const exact = { ...baseExact };
+  // Priority: custom.json (highest) > dictionary.json (curated base) > auto.json
+  const exact = {};
+  for (const [k, v] of Object.entries(autoExact)) {
+    if (typeof k === 'string' && typeof v === 'string' && v.length > 0) {
+      exact[k] = v;
+    }
+  }
+  for (const [k, v] of Object.entries(baseExact)) {
+    if (typeof k === 'string' && typeof v === 'string' && v.length > 0) {
+      exact[k] = v;
+    }
+  }
   for (const [k, v] of Object.entries(customExact)) {
     if (typeof k === 'string' && typeof v === 'string' && v.length > 0) {
       exact[k] = v;
@@ -181,6 +214,7 @@ function loadMergedBundle(userDataDir) {
     collectUntranslated: Boolean(config?.collectUntranslated),
     autoCollectTooltips: config?.autoCollectTooltips !== false,
     japaneseTypography: config?.japaneseTypography !== false,
+    autoTranslate: config?.autoTranslate !== false,
     exact,
     patterns: [...customPatterns, ...basePatterns],
     ignored,
@@ -496,6 +530,26 @@ function importCustomTranslations(userDataDir, jsonMap) {
 
   writeJsonAtomic(files.customDictPath, custom);
 
+  // Clean up any auto.json entries superseded by custom.json / ignored
+  if (fs.existsSync(files.autoDictPath) && importedKeys.length > 0) {
+    const autoDict = readJsonSafe(files.autoDictPath, { exact: {}, meta: {} });
+    if (autoDict && autoDict.exact && typeof autoDict.exact === 'object') {
+      let autoChanged = false;
+      for (const k of importedKeys) {
+        if (Object.prototype.hasOwnProperty.call(autoDict.exact, k)) {
+          delete autoDict.exact[k];
+          if (autoDict.meta && Object.prototype.hasOwnProperty.call(autoDict.meta, k)) {
+            delete autoDict.meta[k];
+          }
+          autoChanged = true;
+        }
+      }
+      if (autoChanged) {
+        writeJsonAtomic(files.autoDictPath, autoDict);
+      }
+    }
+  }
+
   let removedFromUntranslated = 0;
   const untranslated = readJsonSafe(files.untranslatedPath, { items: {} });
   if (untranslated && untranslated.items && typeof untranslated.items === 'object') {
@@ -553,11 +607,54 @@ function filterPendingUntranslatedItems(items, compiled) {
 }
 
 /**
- * Removes entries from untranslated.json that are already translated, ignored, or filtered noise.
+ * Removes entries from auto.json superseded by base/custom dictionaries, and removes
+ * entries from untranslated.json that are already translated, ignored, or filtered noise.
  * @param {string} [userDataDir]
  */
 function pruneTranslatedFromUntranslated(userDataDir) {
   const files = ensureUserDataDir(userDataDir, { refreshBaseDict: false });
+  const bundled = getBundledDictionaryPaths();
+
+  if (fs.existsSync(files.autoDictPath)) {
+    const autoDict = readJsonSafe(files.autoDictPath, { exact: {}, meta: {} });
+    const baseDict =
+      readJsonSafe(files.baseDictPath, null) || readJsonSafe(bundled.baseDictPath, { categories: {}, patterns: [] });
+    const customDict = readJsonSafe(files.customDictPath, { exact: {}, patterns: [], ignored: [] });
+    const nonAutoBundle = compileBundle({
+      exact: {
+        ...flattenExactMap(baseDict),
+        ...(customDict && customDict.exact && typeof customDict.exact === 'object' ? customDict.exact : {}),
+      },
+      patterns: [
+        ...(Array.isArray(customDict?.patterns) ? customDict.patterns : []),
+        ...(Array.isArray(baseDict?.patterns) ? baseDict.patterns : []),
+      ],
+      ignored: Array.isArray(customDict?.ignored) ? customDict.ignored : [],
+    });
+    if (autoDict && autoDict.exact && typeof autoDict.exact === 'object') {
+      let autoChanged = false;
+      for (const key of Object.keys(autoDict.exact)) {
+        const norm = normalizeLookupKey(key);
+        if (
+          nonAutoBundle.exactMap.has(key) ||
+          nonAutoBundle.exactMap.has(norm) ||
+          nonAutoBundle.ignoredSet.has(key) ||
+          nonAutoBundle.ignoredSet.has(norm) ||
+          translateText(key, nonAutoBundle).changed
+        ) {
+          delete autoDict.exact[key];
+          if (autoDict.meta && Object.prototype.hasOwnProperty.call(autoDict.meta, key)) {
+            delete autoDict.meta[key];
+          }
+          autoChanged = true;
+        }
+      }
+      if (autoChanged) {
+        writeJsonAtomic(files.autoDictPath, autoDict);
+      }
+    }
+  }
+
   const bundle = loadMergedBundle(userDataDir);
   const compiled = compileBundle(bundle);
   const untranslated = readJsonSafe(files.untranslatedPath, { items: {} });

@@ -1095,7 +1095,10 @@
         "Render failed": "レンダリングに失敗しました",
         "Profiler": "プロファイラー",
         "Agent can scroll on browser pages to access more content.": "エージェントはブラウザーページをスクロールして追加のコンテンツを読み取れます。",
-        "You should not enter any sensitive information on this site (for example, passwords or credit cards), because it could be stolen by attackers.": "このサイトではパスワードやクレジットカード情報などの機密情報を入力しないでください（攻撃者に盗まれる恐れがあります）。"
+        "You should not enter any sensitive information on this site (for example, passwords or credit cards), because it could be stolen by attackers.": "このサイトではパスワードやクレジットカード情報などの機密情報を入力しないでください（攻撃者に盗まれる恐れがあります）。",
+        "Archive Conversation": "会話をアーカイブ",
+        "At Mention Code Block": "@ メンション（コードブロック）",
+        "Dismiss suggestion": "提案を閉じる"
       }
     },
     "settings": {
@@ -1648,7 +1651,18 @@
         "How loud Antigravity's voice is.": "Antigravity の音声出力の音量です。",
         "How loud Jetski's voice is.": "Jetski の音声出力の音量です。",
         "Voice volume": "音声の音量",
-        "No recordings": "録音データはありません"
+        "No recordings": "録音データはありません",
+        "Your Plan: Google AI Pro": "現在のプラン: Google AI Pro",
+        "You can upgrade to a Google AI Ultra plan to receive higher rate limits.": "Google AI Ultra プランにアップグレードすると、利用上限を引き上げられます。",
+        "Upgrade": "アップグレード",
+        "When toggled on, Antigravity collects usage data to help Google enhance performance and features.": "オンにすると、Google がパフォーマンスと機能を改善するために Antigravity の利用状況データを収集します。",
+        "The voice used in Voice mode. Powered by Gemini Live.": "音声モードで使用する声の設定です（Gemini Live 搭載）。",
+        "Background color picker": "背景色のカラーピッカー",
+        "Foreground color picker": "前景色のカラーピッカー",
+        "Accent color picker": "アクセントカラーのカラーピッカー",
+        "Chime volume": "チャイムの音量",
+        "Clear visited URLs and autocomplete suggestions from the built-in browser.": "内蔵ブラウザーの閲覧履歴とオートコンプリート候補を消去します。",
+        "Configure allowed and denied URLs for the browser subagent. It runs in the built-in browser, so no separate browser install is needed.": "ブラウザーサブエージェントの許可・拒否 URL を設定します。内蔵ブラウザーで動作するため、外部ブラウザーの追加インストールは不要です。"
       }
     },
     "permissions": {
@@ -1963,7 +1977,9 @@
         "Change": "変更",
         "Domains:": "ドメイン:",
         "ID:": "ID:",
-        "Plugin:": "プラグイン:"
+        "Plugin:": "プラグイン:",
+        "Not set": "未設定",
+        "Change...": "変更..."
       }
     }
   },
@@ -3297,6 +3313,13 @@
       "replace": "コマンド実行・ファイル編集",
       "category": "chat",
       "description": "操作まとめ（実行＋編集）"
+    },
+    {
+      "pattern": "^Your Plan:\\s+(.+)$",
+      "flags": "",
+      "replace": "現在のプラン: $1",
+      "category": "settings",
+      "description": "現在のプラン（単一テキストノード版）"
     }
   ]
 }

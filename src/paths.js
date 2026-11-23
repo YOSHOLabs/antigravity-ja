@@ -91,6 +91,7 @@ function getUserDataFiles(overrideDir) {
     dir,
     configPath: path.join(dir, 'config.json'),
     baseDictPath: path.join(dir, 'dictionary.json'),
+    autoDictPath: path.join(dir, 'auto.json'),
     customDictPath: path.join(dir, 'custom.json'),
     untranslatedPath: path.join(dir, 'untranslated.json'),
   };

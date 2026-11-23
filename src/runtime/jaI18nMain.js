@@ -5,11 +5,24 @@ const os = require('os');
 const path = require('path');
 const electron = require('electron');
 
+let autoMod = null;
+try {
+  autoMod = require('./jaAutoTranslator');
+} catch {
+  try {
+    autoMod = require('./autoTranslator');
+  } catch {
+    autoMod = null;
+  }
+}
+
 const SUBMENU_ID = 'antigravity-ja-submenu';
 const TOGGLE_ENABLED_ID = 'antigravity-ja-toggle-enabled';
 const TOGGLE_COLLECT_ID = 'antigravity-ja-toggle-collect';
 const TOGGLE_TYPOGRAPHY_ID = 'antigravity-ja-toggle-typography';
+const TOGGLE_AUTO_TRANSLATE_ID = 'antigravity-ja-toggle-auto-translate';
 const MAX_UNTRANSLATED_ITEMS = 2000;
+const MAX_SESSION_AUTO_TRANSLATIONS = 150;
 
 let initialized = false;
 let userDataDir = '';
@@ -18,12 +31,18 @@ let currentConfig = {
   collectUntranslated: false,
   autoCollectTooltips: true,
   japaneseTypography: true,
+  autoTranslate: true,
+  autoTranslateProvider: 'free',
+  autoTranslateApiKey: '',
+  autoTranslateModel: '',
+  autoTranslateEndpoint: '',
 };
 let currentRawBundle = {
   enabled: true,
   collectUntranslated: false,
   autoCollectTooltips: true,
   japaneseTypography: true,
+  autoTranslate: true,
   exact: {},
   patterns: [],
   ignored: [],
@@ -33,6 +52,7 @@ let compiled = {
   collectUntranslated: false,
   autoCollectTooltips: true,
   japaneseTypography: true,
+  autoTranslate: true,
   exactMap: new Map(),
   patternList: [],
   ignoredSet: new Set(),
@@ -44,9 +64,17 @@ let activeAppMenu = null;
 let fsWatcher = null;
 let reloadTimer = null;
 let untranslatedFlushTimer = null;
+let autoTranslateTimer = null;
+let startupAutoTimer = null;
+let autoTranslateRunning = false;
+let sessionAutoTranslatedCount = 0;
 let bundleRevision = 0;
 let lastConfigWriteAt = 0;
+let lastAutoWriteAt = 0;
+let customAutoFetch = null;
 const pendingUntranslated = new Map();
+const pendingAutoQueue = new Map();
+const failedAutoTexts = new Set();
 const subscribedContents = new Set();
 
 const menuItemOriginals = new WeakMap();
@@ -196,6 +224,7 @@ function compileBundle(rawBundle) {
     collectUntranslated: Boolean(rawBundle?.collectUntranslated),
     autoCollectTooltips: rawBundle?.autoCollectTooltips !== false,
     japaneseTypography: rawBundle?.japaneseTypography !== false,
+    autoTranslate: rawBundle?.autoTranslate !== false,
     exactMap,
     patternList,
     ignoredSet,
@@ -255,6 +284,7 @@ function translateSimple(text) {
 function loadBundleFromDisk() {
   const configPath = path.join(userDataDir, 'config.json');
   const baseDictPath = path.join(userDataDir, 'dictionary.json');
+  const autoDictPath = path.join(userDataDir, 'auto.json');
   const customDictPath = path.join(userDataDir, 'custom.json');
 
   const cfg = readJsonSafe(configPath, {
@@ -262,18 +292,41 @@ function loadBundleFromDisk() {
     collectUntranslated: false,
     autoCollectTooltips: true,
     japaneseTypography: true,
+    autoTranslate: true,
+    autoTranslateProvider: 'free',
+    autoTranslateApiKey: '',
+    autoTranslateModel: '',
+    autoTranslateEndpoint: '',
   });
   currentConfig = {
     enabled: cfg?.enabled !== false,
     collectUntranslated: Boolean(cfg?.collectUntranslated),
     autoCollectTooltips: cfg?.autoCollectTooltips !== false,
     japaneseTypography: cfg?.japaneseTypography !== false,
+    autoTranslate: cfg?.autoTranslate !== false,
+    autoTranslateProvider:
+      typeof cfg?.autoTranslateProvider === 'string' && ['free', 'gemini', 'openai', 'ollama'].includes(cfg.autoTranslateProvider)
+        ? cfg.autoTranslateProvider
+        : 'free',
+    autoTranslateApiKey: typeof cfg?.autoTranslateApiKey === 'string' ? cfg.autoTranslateApiKey.trim() : '',
+    autoTranslateModel: typeof cfg?.autoTranslateModel === 'string' ? cfg.autoTranslateModel.trim() : '',
+    autoTranslateEndpoint: typeof cfg?.autoTranslateEndpoint === 'string' ? cfg.autoTranslateEndpoint.trim() : '',
   };
 
   const baseDict = readJsonSafe(baseDictPath, { categories: {}, patterns: [] });
+  const autoDict = readJsonSafe(autoDictPath, { exact: {}, meta: {} });
   const customDict = readJsonSafe(customDictPath, { exact: {}, patterns: [], ignored: [] });
 
-  const exact = { ...flattenExactMap(baseDict) };
+  // Priority: custom.json (highest) > dictionary.json (curated base) > auto.json
+  const exact = {};
+  if (autoDict && autoDict.exact && typeof autoDict.exact === 'object' && !Array.isArray(autoDict.exact)) {
+    for (const [k, v] of Object.entries(autoDict.exact)) {
+      if (typeof k === 'string' && typeof v === 'string' && v.length > 0) {
+        exact[k] = v;
+      }
+    }
+  }
+  Object.assign(exact, flattenExactMap(baseDict));
   if (customDict && customDict.exact && typeof customDict.exact === 'object' && !Array.isArray(customDict.exact)) {
     for (const [k, v] of Object.entries(customDict.exact)) {
       if (typeof k === 'string' && typeof v === 'string' && v.length > 0) {
@@ -294,6 +347,7 @@ function loadBundleFromDisk() {
     collectUntranslated: currentConfig.collectUntranslated,
     autoCollectTooltips: currentConfig.autoCollectTooltips,
     japaneseTypography: currentConfig.japaneseTypography,
+    autoTranslate: currentConfig.autoTranslate,
     exact,
     patterns: [...customPatterns, ...basePatterns],
     ignored,
@@ -423,6 +477,16 @@ function buildJaSubmenuItem() {
         saveConfigAndBroadcast();
       },
     },
+    {
+      id: TOGGLE_AUTO_TRANSLATE_ID,
+      label: '新UIを自動翻訳',
+      type: 'checkbox',
+      checked: currentConfig.autoTranslate,
+      click: () => {
+        currentConfig.autoTranslate = !currentConfig.autoTranslate;
+        saveConfigAndBroadcast();
+      },
+    },
     { type: 'separator' },
     {
       label: '辞書フォルダを開く',
@@ -469,6 +533,10 @@ function syncJaSubmenuCheckboxes(menu) {
   const typoItem = sub.submenu.items.find((i) => i && i.id === TOGGLE_TYPOGRAPHY_ID);
   if (typoItem) {
     typoItem.checked = currentConfig.japaneseTypography;
+  }
+  const autoItem = sub.submenu.items.find((i) => i && i.id === TOGGLE_AUTO_TRANSLATE_ID);
+  if (autoItem) {
+    autoItem.checked = currentConfig.autoTranslate;
   }
 }
 
@@ -575,8 +643,97 @@ function flushUntranslatedNow() {
   }
 }
 
+function scheduleAutoTranslate(delayMs = 1200) {
+  if (!autoMod || !compiled.enabled || !compiled.autoTranslate) {
+    return;
+  }
+  if (autoTranslateTimer) {
+    return;
+  }
+  autoTranslateTimer = setTimeout(() => {
+    autoTranslateTimer = null;
+    void flushAutoTranslateQueue();
+  }, delayMs);
+  if (autoTranslateTimer && typeof autoTranslateTimer.unref === 'function') {
+    autoTranslateTimer.unref();
+  }
+}
+
+async function flushAutoTranslateQueue() {
+  if (
+    !autoMod ||
+    autoTranslateRunning ||
+    !compiled.enabled ||
+    !compiled.autoTranslate ||
+    sessionAutoTranslatedCount >= MAX_SESSION_AUTO_TRANSLATIONS ||
+    pendingAutoQueue.size === 0
+  ) {
+    return { attempted: 0, translated: 0 };
+  }
+
+  const batchItems = [];
+  for (const [text, meta] of pendingAutoQueue.entries()) {
+    pendingAutoQueue.delete(text);
+    const norm = normalizeLookupKey(text);
+    if (
+      compiled.exactMap.has(text) ||
+      compiled.exactMap.has(norm) ||
+      compiled.ignoredSet.has(text) ||
+      compiled.ignoredSet.has(norm) ||
+      failedAutoTexts.has(text) ||
+      translateSimple(text) !== text
+    ) {
+      continue;
+    }
+    if (!autoMod.isSafeForAutoTranslate(text, meta)) {
+      continue;
+    }
+    batchItems.push({ text, ...meta });
+    if (batchItems.length >= 20) {
+      break;
+    }
+  }
+
+  if (batchItems.length === 0) {
+    return { attempted: 0, translated: 0 };
+  }
+
+  autoTranslateRunning = true;
+  let res = { attempted: 0, translated: 0, addedEntries: {} };
+  try {
+    lastAutoWriteAt = Date.now();
+    res = await autoMod.runAutoTranslateForUserDir(userDataDir, {
+      texts: batchItems,
+      maxItems: 20,
+      timeoutMs: 7000,
+      _fetch: customAutoFetch || undefined,
+    });
+    const added = res && res.addedEntries ? res.addedEntries : {};
+    for (const item of batchItems) {
+      if (!Object.prototype.hasOwnProperty.call(added, item.text)) {
+        failedAutoTexts.add(item.text);
+      }
+    }
+    if (res && res.translated > 0) {
+      sessionAutoTranslatedCount += res.translated;
+      lastAutoWriteAt = Date.now();
+      reloadAndBroadcast();
+    }
+  } catch {
+    for (const item of batchItems) {
+      failedAutoTexts.add(item.text);
+    }
+  } finally {
+    autoTranslateRunning = false;
+    if (pendingAutoQueue.size > 0 && sessionAutoTranslatedCount < MAX_SESSION_AUTO_TRANSLATIONS) {
+      scheduleAutoTranslate(600);
+    }
+  }
+  return res;
+}
+
 function recordUntranslatedBatch(batch) {
-  if ((!compiled.collectUntranslated && !compiled.autoCollectTooltips) || !Array.isArray(batch)) {
+  if ((!compiled.collectUntranslated && !compiled.autoCollectTooltips && !compiled.autoTranslate) || !Array.isArray(batch)) {
     return;
   }
   for (const item of batch) {
@@ -584,9 +741,7 @@ function recordUntranslatedBatch(batch) {
       continue;
     }
     const isTooltip = Boolean(item.inTooltip);
-    if (!compiled.collectUntranslated && !(compiled.autoCollectTooltips && isTooltip)) {
-      continue;
-    }
+    const shouldStore = compiled.collectUntranslated || (compiled.autoCollectTooltips && isTooltip);
     const norm = normalizeLookupKey(item.text);
     if (
       compiled.exactMap.has(item.text) ||
@@ -596,6 +751,27 @@ function recordUntranslatedBatch(batch) {
     ) {
       continue;
     }
+
+    if (
+      compiled.autoTranslate &&
+      autoMod &&
+      !failedAutoTexts.has(item.text) &&
+      sessionAutoTranslatedCount < MAX_SESSION_AUTO_TRANSLATIONS &&
+      autoMod.isSafeForAutoTranslate(item.text, item)
+    ) {
+      if (!pendingAutoQueue.has(item.text) && pendingAutoQueue.size < 200) {
+        pendingAutoQueue.set(item.text, {
+          tags: Array.isArray(item.tags) ? item.tags : [],
+          roles: Array.isArray(item.roles) ? item.roles : [],
+          attrs: Array.isArray(item.attrs) ? item.attrs : [],
+          inTooltip: isTooltip,
+        });
+      }
+    }
+
+    if (!shouldStore) {
+      continue;
+    }
     const prev = pendingUntranslated.get(item.text) || { count: 0, tags: [], roles: [], attrs: [], inTooltip: false };
     prev.count += Number(item.count) || 1;
     if (isTooltip) prev.inTooltip = true;
@@ -603,6 +779,9 @@ function recordUntranslatedBatch(batch) {
     for (const r of item.roles || []) if (!prev.roles.includes(r) && prev.roles.length < 6) prev.roles.push(r);
     for (const a of item.attrs || []) if (!prev.attrs.includes(a) && prev.attrs.length < 6) prev.attrs.push(a);
     pendingUntranslated.set(item.text, prev);
+  }
+  if (pendingAutoQueue.size > 0) {
+    scheduleAutoTranslate(1200);
   }
   if (!untranslatedFlushTimer && pendingUntranslated.size > 0) {
     untranslatedFlushTimer = setTimeout(() => {
@@ -753,10 +932,13 @@ function installPatches() {
           if (name.includes('.tmp-') || name === 'untranslated.json') {
             return;
           }
-          if (name !== 'config.json' && name !== 'dictionary.json' && name !== 'custom.json') {
+          if (name !== 'config.json' && name !== 'dictionary.json' && name !== 'auto.json' && name !== 'custom.json') {
             return;
           }
           if (name === 'config.json' && Date.now() - lastConfigWriteAt < 500) {
+            return;
+          }
+          if (name === 'auto.json' && Date.now() - lastAutoWriteAt < 800) {
             return;
           }
         }
@@ -779,7 +961,16 @@ function installPatches() {
         clearTimeout(reloadTimer);
         reloadTimer = null;
       }
+      if (autoTranslateTimer) {
+        clearTimeout(autoTranslateTimer);
+        autoTranslateTimer = null;
+      }
+      if (startupAutoTimer) {
+        clearTimeout(startupAutoTimer);
+        startupAutoTimer = null;
+      }
       subscribedContents.clear();
+      pendingAutoQueue.clear();
       flushUntranslatedNow();
       if (fsWatcher) {
         try {
@@ -802,11 +993,43 @@ function initJaI18n() {
     userDataDir = resolveUserDataDir();
     loadBundleFromDisk();
     installPatches();
+    if (autoMod && compiled.enabled && compiled.autoTranslate) {
+      startupAutoTimer = setTimeout(() => {
+        startupAutoTimer = null;
+        if (!compiled.enabled || !compiled.autoTranslate || sessionAutoTranslatedCount >= MAX_SESSION_AUTO_TRANSLATIONS) {
+          return;
+        }
+        lastAutoWriteAt = Date.now();
+        void autoMod
+          .runAutoTranslateForUserDir(userDataDir, {
+            maxItems: 25,
+            timeoutMs: 7000,
+            _fetch: customAutoFetch || undefined,
+          })
+          .then((res) => {
+            if (res && res.translated > 0) {
+              sessionAutoTranslatedCount += res.translated;
+              lastAutoWriteAt = Date.now();
+              reloadAndBroadcast();
+            }
+          })
+          .catch(() => undefined);
+      }, 2500);
+      if (startupAutoTimer && typeof startupAutoTimer.unref === 'function') {
+        startupAutoTimer.unref();
+      }
+    }
   } catch {
     // Never fail host app startup
   }
 }
 
+function _setAutoTranslateFetcher(fn) {
+  customAutoFetch = typeof fn === 'function' ? fn : null;
+}
+
 module.exports = {
   initJaI18n,
+  _flushAutoTranslateQueueForTest: flushAutoTranslateQueue,
+  _setAutoTranslateFetcher,
 };

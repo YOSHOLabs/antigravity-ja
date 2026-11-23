@@ -22,6 +22,7 @@
     "apply": "node src/cli.js apply",
     "restore": "node src/cli.js restore",
     "sync": "node src/cli.js sync",
+    "auto-translate": "node src/cli.js auto-translate",
     "validate": "node src/cli.js validate"
   },
   "engines": {

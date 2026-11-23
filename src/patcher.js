@@ -110,10 +110,12 @@ function getStatus(options = {}) {
       const mainBuf = readAsarFile(paths.asarPath, 'dist/main.js');
       const preloadBuf = readAsarFile(paths.asarPath, 'dist/preload.js');
       const jaMainBuf = readAsarFile(paths.asarPath, 'dist/jaI18nMain.js');
+      const jaAutoBuf = readAsarFile(paths.asarPath, 'dist/jaAutoTranslator.js');
       patched = Boolean(
         mainBuf &&
           preloadBuf &&
           jaMainBuf &&
+          jaAutoBuf &&
           mainBuf.toString('utf8').includes(MAIN_START_MARKER) &&
           preloadBuf.toString('utf8').includes(PRELOAD_START_MARKER)
       );
@@ -141,6 +143,7 @@ function getStatus(options = {}) {
   const baseDict = fs.existsSync(userFiles.baseDictPath)
     ? readJsonSafe(userFiles.baseDictPath, loadBaseDictionary())
     : loadBaseDictionary();
+  const autoDict = readJsonSafe(userFiles.autoDictPath, { exact: {} });
   const customDict = readJsonSafe(userFiles.customDictPath, { exact: {}, patterns: [], ignored: [] });
   const validation = validateDictionary(baseDict, customDict);
   const untranslated = readJsonSafe(userFiles.untranslatedPath, { items: {} });
@@ -162,6 +165,8 @@ function getStatus(options = {}) {
     userDataDir: userFiles.dir,
     dictionaryStats: {
       ...validation.stats,
+      autoExactCount:
+        autoDict && autoDict.exact && typeof autoDict.exact === 'object' ? Object.keys(autoDict.exact).length : 0,
       customExactCount:
         customDict && customDict.exact && typeof customDict.exact === 'object' ? Object.keys(customDict.exact).length : 0,
       customPatternCount: Array.isArray(customDict?.patterns) ? customDict.patterns.length : 0,
@@ -251,16 +256,21 @@ function applyPatch(options = {}) {
   const jaMainPath = path.join(__dirname, 'runtime', 'jaI18nMain.js');
   const jaMainBuf = fs.readFileSync(jaMainPath);
   const jaMainSrc = jaMainBuf.toString('utf8');
+  const jaAutoPath = path.join(__dirname, 'runtime', 'autoTranslator.js');
+  const jaAutoBuf = fs.readFileSync(jaAutoPath);
+  const jaAutoSrc = jaAutoBuf.toString('utf8');
 
   // Verify JS syntax for all modified/added scripts before writing app.asar.
   new vm.Script(nextMain, { filename: 'dist/main.js' });
   new vm.Script(nextPreload, { filename: 'dist/preload.js' });
   new vm.Script(jaMainSrc, { filename: 'dist/jaI18nMain.js' });
+  new vm.Script(jaAutoSrc, { filename: 'dist/jaAutoTranslator.js' });
 
   const upserts = new Map([
     ['dist/main.js', Buffer.from(nextMain, 'utf8')],
     ['dist/preload.js', Buffer.from(nextPreload, 'utf8')],
     ['dist/jaI18nMain.js', jaMainBuf],
+    ['dist/jaAutoTranslator.js', jaAutoBuf],
   ]);
 
   patchAsar(paths.asarPath, paths.asarPath, { upsertFiles: upserts });
